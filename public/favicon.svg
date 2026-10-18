@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+
+  <!-- Dark rounded background — matches site bg #0f172a -->
+  <rect width="32" height="32" rx="7" fill="#0f172a"/>
+
+  <!-- Subtle border — dark-blue terminal frame -->
+  <rect x="1" y="1" width="30" height="30" rx="6.5"
+        fill="none" stroke="#1e3a5f" stroke-width="1.2"/>
+
+  <!-- Terminal chevron  >  -->
+  <path d="M7 12 L13.5 16 L7 20"
+        stroke="#10b981" stroke-width="2.8"
+        fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Cursor underscore  _  (blinking cursor at the prompt) -->
+  <line x1="16.5" y1="20" x2="25.5" y2="20"
+        stroke="#10b981" stroke-width="2.8"
+        stroke-linecap="round"/>
+
+</svg>
