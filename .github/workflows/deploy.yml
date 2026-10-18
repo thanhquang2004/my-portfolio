@@ -1,0 +1,145 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CI/CD Pipeline – Build (Vite) → Deploy (S3) → Invalidate (CloudFront)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#
+#   AWS_ACCESS_KEY_ID            IAM user access key
+#   AWS_SECRET_ACCESS_KEY        IAM user secret key
+#   AWS_REGION                   e.g. ap-southeast-1
+#   S3_BUCKET_NAME               e.g. marvin.io.vn  (no s3:// prefix)
+#   CLOUDFRONT_DISTRIBUTION_ID   e.g. E1ABCDEF123456
+#   APP_DOMAIN            e.g. marvin.io.vn  (for summary)
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI/CD → S3 + CloudFront
+
+on:
+  push:
+    branches:
+      - main          # auto-deploy on every push to main
+  workflow_dispatch:  # allow manual trigger from the GitHub Actions UI
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  build-and-deploy:
+    name: Build → S3 → CloudFront
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Node.js setup with npm cache ────────────────────────────────────
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm   # caches ~/.npm between runs for faster installs
+
+      # ── 3. Install ─────────────────────────────────────────────────────────
+      - name: Install dependencies
+        run: npm ci   # clean install from package-lock.json; never upgrades
+
+      # ── 4. Build ───────────────────────────────────────────────────────────
+      - name: Build Vite bundle
+        run: npm run build
+        env:
+          # Expose any build-time env vars here, e.g.:
+          # VITE_GA_ID: ${{ secrets.VITE_GA_ID }}
+          NODE_ENV: production
+
+      - name: Inspect build output
+        run: |
+          echo "── dist/ ──────────────────────────────────────"
+          ls -lh dist/
+          echo "── dist/assets/ ───────────────────────────────"
+          ls -lh dist/assets/
+
+      # ── 5. AWS credentials ─────────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # ── 6. Deploy to S3 ─────────────────────────────────────────────────────
+      #
+      # Upload strategy (order matters):
+      #
+      #   Step A – dist/assets/*
+      #     Vite fingerprints every JS/CSS filename with a content hash,
+      #     so these files can be cached forever (immutable).
+      #     Cache-Control: public, max-age=31536000, immutable
+      #
+      #   Step B – other root-level files (PDF, favicon, etc.)
+      #     Not fingerprinted → use a short cache so updates propagate.
+      #     Cache-Control: public, max-age=86400  (24 h)
+      #
+      #   Step C – index.html (uploaded last)
+      #     Must never be cached; the browser/CDN should always fetch fresh
+      #     so it picks up the new hashed asset URLs after each deploy.
+      #     Cache-Control: no-cache, no-store, must-revalidate
+      #
+      # --delete removes any S3 objects no longer present in dist/
+      # ────────────────────────────────────────────────────────────────────────
+
+      - name: "S3 → Upload hashed assets (immutable, 1 year)"
+        run: |
+          aws s3 sync dist/assets/ \
+            s3://${{ secrets.S3_BUCKET_NAME }}/assets/ \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: "S3 → Upload root static files (1 day)"
+        run: |
+          aws s3 sync dist/ \
+            s3://${{ secrets.S3_BUCKET_NAME }}/ \
+            --exclude "assets/*" \
+            --exclude "index.html" \
+            --delete \
+            --cache-control "public, max-age=86400"
+
+      - name: "S3 → Upload index.html (no-cache)"
+        run: |
+          aws s3 cp dist/index.html \
+            s3://${{ secrets.S3_BUCKET_NAME }}/index.html \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --content-type "text/html; charset=utf-8"
+
+      # ── 7. CloudFront cache invalidation ───────────────────────────────────
+      #
+      # Invalidate /* so the new index.html and any renamed assets propagate
+      # to all edge locations immediately. The immutable assets won't be
+      # re-requested by clients anyway (same hash = same filename).
+      # ────────────────────────────────────────────────────────────────────────
+
+      - name: Invalidate CloudFront distribution
+        id: invalidation
+        run: |
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*" \
+            --query 'Invalidation.Id' \
+            --output text)
+          echo "id=$INVALIDATION_ID" >> "$GITHUB_OUTPUT"
+          echo "Invalidation created: $INVALIDATION_ID"
+
+      # ── 8. Job summary ─────────────────────────────────────────────────────
+      - name: Write deployment summary
+        run: |
+          echo "## 🚀 Deployment complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Bucket** | \`s3://${{ secrets.S3_BUCKET_NAME }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Distribution** | \`${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Invalidation** | \`${{ steps.invalidation.outputs.id }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Live URL** | https://${{ secrets.APP_DOMAIN }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
